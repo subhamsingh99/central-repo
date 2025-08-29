@@ -1,0 +1,131 @@
+pipeline {
+    agent any
+
+    tools {
+        maven "maven3"
+        jdk "jdk17"
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonarqube'
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git(branch: "main", url: "git@github.com:subhamsingh99/central-repo.git", credentialsId: "github-ssh")
+            }
+        }
+
+        stage('Maven Compile') {
+            steps {
+                dir('subham') { 
+                    sh "java -version && mvn clean compile -Dmaven.test.skip=true" 
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                dir('subham') { 
+                    sh "mvn clean test -Dmaven.test.skip=true" 
+                }
+            }
+        }
+
+        stage("Trivy FS Scan") {
+            steps {
+                dir('subham') { 
+                    sh 'trivy fs --format template --template "@/opt/trivy-templates/html.tpl" -o trivy-fs-report.html .' 
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    dir('subham') {
+                        sh '$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=subham -Dsonar.projectName=Mission -Dsonar.java.binaries=target'
+                    }
+                }
+            }
+        }
+
+        stage('Maven Package') {
+            steps {
+                dir('subham') { 
+                    sh "mvn clean package -Dmaven.test.skip=true" 
+                }
+            }
+        }
+
+        stage('Deploy Artifact') {
+            steps {
+                dir('subham') {
+                    withMaven(globalMavenSettingsConfig: 'maven-setting', jdk: 'jdk17', maven: 'maven3', traceability: true) {
+                        sh "mvn deploy -Dmaven.test.skip=true"
+                    }
+                }
+            }
+        }
+
+        stage('Build and Tag Docker Image') {
+            steps {
+                dir('subham') {
+                    withDockerRegistry(credentialsId: 'docker-cred', url: 'https://index.docker.io/v1/') {
+                        sh 'docker build -t subhamsingh99/projecto:latest .'
+                    }
+                }
+            }
+        }
+
+        stage("Trivy Scan Docker Image") {
+            steps {
+                sh 'trivy image --format template --template "@/opt/trivy-templates/html.tpl" -o trivy-image-report.html subhamsingh99/projecto:latest'
+            }
+        }
+
+        stage('Publish Docker Image') {
+            steps {
+                dir('subham') {
+                    withDockerRegistry(credentialsId: 'docker-cred', url: 'https://index.docker.io/v1/') {
+                        sh 'docker push subhamsingh99/projecto:latest'
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to K8s') {
+            steps {
+                withKubeConfig(
+                    caCertificate: '', 
+                    clusterName: 'my-eks2024', 
+                    contextName: '', 
+                    credentialsId: 'k8-token', 
+                    namespace: 'webapps', 
+                    restrictKubeConfigAccess: false, 
+                    serverUrl: 'https://049CD6B14B46CF878BC8F7E382971E9A.gr7.ap-south-1.eks.amazonaws.com'
+                ) {
+                    sh "kubectl apply -f deploy.yaml -n webapps && kubectl apply -f srv.yml -n webapps && sleep 60"
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                withKubeConfig(
+                    caCertificate: '', 
+                    clusterName: 'my-eks2024', 
+                    contextName: '', 
+                    credentialsId: 'k8-token', 
+                    namespace: 'webapps', 
+                    restrictKubeConfigAccess: false, 
+                    serverUrl: 'https://049CD6B14B46CF878BC8F7E382971E9A.gr7.ap-south-1.eks.amazonaws.com'
+                ) {
+                    sh "kubectl get pods -n webapps && kubectl get svc -n webapps"
+                }
+            }
+        }
+    }
+}
+
